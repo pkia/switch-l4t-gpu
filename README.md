@@ -39,6 +39,7 @@ Write your own kernels:
 ```bash
 ./ncc mykernels.cu                      # native compile: ~0.3 s
 ./gpu_workload mykernels.ptx            # run through the driver-API harness
+./gpu_workload --json mykernels.ptx     # same suite as one machine-readable JSON object
 ```
 
 Kernels are plain CUDA C (`extern "C" __global__ void ...`) — see [switch_gpu.cu](switch_gpu.cu)
@@ -72,6 +73,13 @@ ISA ≤ 6.3 / `sm_53`:
   via `cuModuleLoadData`, launches kernels, checks results against CPU references, and times them.
   [cuda_drv.h](cuda_drv.h) declares the needed driver API — no toolkit headers required.
 
+## Cluster / task-queue integration
+
+One process, one PTX argument, deterministic verified output — `gpu_workload` is a drop-in
+workload for a task queue: a worker claims a unit, runs the suite, reports the numbers.
+[`deploy/cluster/`](deploy/cluster/README.md) documents the exact contract (GPU-home layout,
+`--json` schema, capability detection) with a standalone stdlib-Python example consumer.
+
 ## Known limitations (all discovered the hard way)
 
 - **Always `-O3`.** nvcc optimizes device code by default; clang does not. A native build without
@@ -99,6 +107,7 @@ gpu_test.c              driver API + hand-written PTX smoke test (no compiler ne
 cpu_fma.c               CPU FMA reference benchmark
 examples/               runtime-API example (documents the known limitation)
 tools/                  one-shot toolchain setups (native + cross) and deploy helper
+deploy/cluster/         run the suite from a task-queue worker (contract + example)
 docs/                   BENCHMARKS.md, RUNBOOK.md (operations guide)
 ```
 
