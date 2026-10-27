@@ -1,0 +1,7 @@
+# generated artifacts
+*.ptx
+gpu_workload
+gpu_test
+native_saxpy
+*.o
+*.log

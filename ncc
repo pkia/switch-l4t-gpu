@@ -1,0 +1,10 @@
+#!/bin/sh
+# ncc — native CUDA kernel compiler for the Switch: .cu -> .ptx (sm_53, PTX 6.3, -O3).
+# Usage: ncc kernels.cu [out.ptx]   then run: ./gpu_workload out.ptx
+set -e
+[ -z "$1" ] && { echo "usage: ncc kernels.cu [out.ptx]"; exit 1; }
+IN="$1"; OUT="${2:-${IN%.cu}.ptx}"
+exec clang++-18 -O3 -S --cuda-device-only -x cuda --cuda-gpu-arch=sm_53 --cuda-feature=+ptx63 \
+  -nocudainc -nocudalib -I/usr/local/cuda-10.0/include -D__CUDACC__ \
+  -include __clang_cuda_builtin_vars.h -include vector_types.h -include vector_functions.h \
+  -o "$OUT" "$IN"
