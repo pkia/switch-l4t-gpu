@@ -11,6 +11,11 @@ typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext, *CUmodule, *CUfunction, *CUstream;
 typedef uint64_t CUdeviceptr;
+
+// --json: emit one machine-readable JSON object on stdout instead of human lines.
+static int json_mode;
+#define OUT(...) do { if (!json_mode) printf(__VA_ARGS__); } while (0)
+
 extern CUresult cuInit(unsigned int);
 extern CUresult cuDeviceGet(CUdevice*, int);
 extern CUresult cuCtxCreate_v2(CUcontext*, unsigned, CUdevice);
@@ -43,7 +48,17 @@ static char *read_file(const char *path, size_t *len) {
 }
 
 int main(int argc, char **argv) {
-    const char *ptx_path = argc > 1 ? argv[1] : "switch_gpu.ptx";
+    const char *ptx_path = "switch_gpu.ptx";
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) json_mode = 1;
+        else ptx_path = argv[i];
+    }
+    const int sizes[] = {256, 512, 1024};
+    // run record (emitted as JSON when --json)
+    const char *v_sgemm = NULL, *v_naive = NULL, *v_tiled4 = NULL, *v_opt = NULL;
+    double sg_ms[3] = {0}, sg_gf[3] = {0}, s4_ms[3] = {0}, s4_gf[3] = {0};
+    double so_ms[3] = {0}, so_gf[3] = {0};
+    double membw_gbs = 0;
     CUcontext ctx; CUdevice dev; CUmodule mod; CUfunction sgemm, membw;
     size_t plen; char *ptx = read_file(ptx_path, &plen);
 
@@ -59,7 +74,6 @@ int main(int argc, char **argv) {
     cuModuleGetFunction(&sgopt, mod, "sgemm_opt");     // optional float4 optimized kernel
 
     // ---- SGEMM ----
-    int sizes[] = {256, 512, 1024};
     for (int si = 0; si < 3; si++) {
         int n = sizes[si];
         size_t bytes = (size_t)n * n * 4;
@@ -90,14 +104,15 @@ int main(int argc, char **argv) {
                             for (int k = 0; k < 32; k++)  p32 += A[i * n + k] * B[k * n + j];
                             for (int k = 0; k < 64; k++)  p64 += A[i * n + k] * B[k * n + j];
                             for (int k = 0; k < 96; k++)  p96 += A[i * n + k] * B[k * n + j];
-                            printf("  mismatch [%d][%d]: got %.4f want %.4f (k<32:%.4f k<64:%.4f k<96:%.4f)\n",
+                            OUT("  mismatch [%d][%d]: got %.4f want %.4f (k<32:%.4f k<64:%.4f k<96:%.4f)\n",
                                    i, j, C[i * n + j], ref, p32, p64, p96);
                         } else if (bad < 3)
-                            printf("  mismatch [%d][%d]: got %.4f want %.4f\n", i, j, C[i * n + j], ref);
+                            OUT("  mismatch [%d][%d]: got %.4f want %.4f\n", i, j, C[i * n + j], ref);
                         bad++; break;
                     }
                 }
-            printf("sgemm %d: %s\n", n, bad ? "WRONG" : "CORRECT");
+            v_sgemm = bad ? "WRONG" : "CORRECT";
+            OUT("sgemm %d: %s\n", n, v_sgemm);
             if (naive && n == 256) {  // bisect: naive kernel against same CPU reference
                 CHK(cuLaunchKernel(naive, n / 16, n / 16, 1, 16, 16, 1, 0, NULL, args2, NULL));
                 CHK(cuCtxSynchronize());
@@ -111,7 +126,8 @@ int main(int argc, char **argv) {
                         if (d < 0) d = -d;
                         if (d > 0.05f * (ref < 0 ? -ref : ref) + 1e-3f) nbad++;
                     }
-                printf("sgemm_naive %d: %s (%d bad cells)\n", n, nbad ? "WRONG" : "CORRECT", nbad);
+                v_naive = nbad ? "WRONG" : "CORRECT";
+                OUT("sgemm_naive %d: %s (%d bad cells)\n", n, v_naive, nbad);
             }
         }
         double t0 = now_s();
@@ -119,8 +135,9 @@ int main(int argc, char **argv) {
             CHK(cuLaunchKernel(sgemm, n / 32, n / 32, 1, 16, 16, 1, 0, NULL, args2, NULL));
         CHK(cuCtxSynchronize());
         double dt = now_s() - t0;
-        printf("sgemm %dx%dx%d: %.1f ms/iter, %.1f GFLOPS\n", n, n, n,
-               dt * 100.0, 10.0 * 2.0 * n * n * n / dt / 1e9);
+        sg_ms[si] = dt * 100.0;
+        sg_gf[si] = 10.0 * 2.0 * n * n * n / dt / 1e9;
+        OUT("sgemm %dx%dx%d: %.1f ms/iter, %.1f GFLOPS\n", n, n, n, sg_ms[si], sg_gf[si]);
         if (sgemm4) {  // 4x4 register-tiled kernel: verify at 256, bench at all sizes
             CHK(cuLaunchKernel(sgemm4, n / 64, n / 64, 1, 16, 16, 1, 0, NULL, args2, NULL));
             CHK(cuCtxSynchronize());
@@ -135,15 +152,17 @@ int main(int argc, char **argv) {
                         if (d < 0) d = -d;
                         if (d > 0.05f * (ref < 0 ? -ref : ref) + 1e-3f) { qbad++; break; }
                     }
-                printf("sgemm_tiled4 %d: %s\n", n, qbad ? "WRONG" : "CORRECT");
+                v_tiled4 = qbad ? "WRONG" : "CORRECT";
+                OUT("sgemm_tiled4 %d: %s\n", n, v_tiled4);
             }
             double q0 = now_s();
             for (int r = 0; r < 10; r++)
                 CHK(cuLaunchKernel(sgemm4, n / 64, n / 64, 1, 16, 16, 1, 0, NULL, args2, NULL));
             CHK(cuCtxSynchronize());
             double qdt = now_s() - q0;
-            printf("sgemm4 %dx%dx%d: %.1f ms/iter, %.1f GFLOPS\n", n, n, n,
-                   qdt * 100.0, 10.0 * 2.0 * n * n * n / qdt / 1e9);
+            s4_ms[si] = qdt * 100.0;
+            s4_gf[si] = 10.0 * 2.0 * n * n * n / qdt / 1e9;
+            OUT("sgemm4 %dx%dx%d: %.1f ms/iter, %.1f GFLOPS\n", n, n, n, s4_ms[si], s4_gf[si]);
         }
         if (sgopt) {  // float4/vectorized optimized kernel: verify at 256, bench all sizes
             CHK(cuLaunchKernel(sgopt, n / 64, n / 64, 1, 16, 16, 1, 0, NULL, args2, NULL));
@@ -159,15 +178,17 @@ int main(int argc, char **argv) {
                         if (d < 0) d = -d;
                         if (d > 0.05f * (ref < 0 ? -ref : ref) + 1e-3f) { obad++; break; }
                     }
-                printf("sgemm_opt %d: %s\n", n, obad ? "WRONG" : "CORRECT");
+                v_opt = obad ? "WRONG" : "CORRECT";
+                OUT("sgemm_opt %d: %s\n", n, v_opt);
             }
             double o0 = now_s();
             for (int r = 0; r < 10; r++)
                 CHK(cuLaunchKernel(sgopt, n / 64, n / 64, 1, 16, 16, 1, 0, NULL, args2, NULL));
             CHK(cuCtxSynchronize());
             double odt = now_s() - o0;
-            printf("sgemm_opt %dx%dx%d: %.1f ms/iter, %.1f GFLOPS\n", n, n, n,
-                   odt * 100.0, 10.0 * 2.0 * n * n * n / odt / 1e9);
+            so_ms[si] = odt * 100.0;
+            so_gf[si] = 10.0 * 2.0 * n * n * n / odt / 1e9;
+            OUT("sgemm_opt %dx%dx%d: %.1f ms/iter, %.1f GFLOPS\n", n, n, n, so_ms[si], so_gf[si]);
         }
         cuMemFree_v2(dA); cuMemFree_v2(dB); cuMemFree_v2(dC);
         free(A); free(B); free(C);
@@ -193,10 +214,43 @@ int main(int argc, char **argv) {
         CHK(cuCtxSynchronize());
         double dt = now_s() - t0;
         double gbs = (double)bytes * iters / dt / 1e9;
-        printf("membw read (64MB x%d): %.3f s, %.1f GB/s\n", iters, dt, gbs);
+        membw_gbs = gbs;
+        OUT("membw read (64MB x%d): %.3f s, %.1f GB/s\n", iters, dt, gbs);
         cuMemFree_v2(dbuf); cuMemFree_v2(dout); free(buf);
     }
 
-    printf("WORKLOAD_DONE\n");
+    if (json_mode) {
+        printf("{\"ptx\":\"");
+        for (const char *p = ptx_path; *p; p++) {
+            if (*p == '"' || *p == '\\') putchar('\\');
+            putchar(*p);
+        }
+        printf("\",\"kernels\":{\"sgemm\":\"%s\"", v_sgemm ? v_sgemm : "NOT_RUN");
+        if (v_naive)  printf(",\"sgemm_naive\":\"%s\"", v_naive);
+        if (v_tiled4) printf(",\"sgemm_tiled4\":\"%s\"", v_tiled4);
+        if (v_opt)    printf(",\"sgemm_opt\":\"%s\"", v_opt);
+        printf("},\"sgemm\":[");
+        for (int i = 0; i < 3; i++)
+            printf("%s{\"n\":%d,\"ms\":%.1f,\"gflops\":%.1f}", i ? "," : "",
+                   sizes[i], sg_ms[i], sg_gf[i]);
+        printf("]");
+        if (sgemm4) {
+            printf(",\"sgemm4\":[");
+            for (int i = 0; i < 3; i++)
+                printf("%s{\"n\":%d,\"ms\":%.1f,\"gflops\":%.1f}", i ? "," : "",
+                       sizes[i], s4_ms[i], s4_gf[i]);
+            printf("]");
+        }
+        if (sgopt) {
+            printf(",\"sgemm_opt\":[");
+            for (int i = 0; i < 3; i++)
+                printf("%s{\"n\":%d,\"ms\":%.1f,\"gflops\":%.1f}", i ? "," : "",
+                       sizes[i], so_ms[i], so_gf[i]);
+            printf("]");
+        }
+        printf(",\"membw_gbps\":%.1f,\"done\":true}\n", membw_gbs);
+    } else {
+        printf("WORKLOAD_DONE\n");
+    }
     return 0;
 }
