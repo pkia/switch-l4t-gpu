@@ -1,0 +1,19 @@
+# model binaries and regenerable artifacts (988MB safetensors, 943MB bins, etc.)
+*.bin
+weights/
+*.ptx
+trace_*.bin
+
+# run scratch
+*.log
+out*.ids
+*.ids
+!prompt.ids
+run*.log
+q*.log
+s_*.log
+b_*.log
+v*.log
+runf.log
+core*
+gpu-llm/prompt.ids
