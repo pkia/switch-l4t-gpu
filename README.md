@@ -1,5 +1,10 @@
 # switch-l4t-gpu
 
+> Running LLMs on old hardware feels like a modern day can it run quake
+
+See [gpu-llm/](gpu-llm/) — hand-written CUDA→PTX transformer engines: Qwen2.5-0.5B-Instruct
+at 8.9 tok/s (FP16) and GPT-2 124M at 36 tok/s (FP32) on the Tegra X1 GPU, driver API only.
+
 **CUDA GPU compute on Nintendo Switch Linux — reconstructed for 2026.**
 
 Run verified, benchmarked CUDA kernels on the Switch's Tegra X1 (GM20B, Maxwell, sm_53) under

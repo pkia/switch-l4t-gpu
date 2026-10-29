@@ -36,7 +36,7 @@ extern CUresult cuMemcpyDtoD_v2(CUdeviceptr, CUdeviceptr, size_t);
 extern CUresult cuLaunchKernel(CUfunction, unsigned, unsigned, unsigned, unsigned, unsigned,
                                unsigned, unsigned, CUstream, void **, void **);
 extern CUresult cuCtxSynchronize(void);
-extern CUresult cuGetErrorString(CUresult, const char *);
+extern CUresult cuGetErrorString(CUresult, const char **);
 #define CHK(x) do { CUresult r_ = (x); if (r_) { const char *s_; cuGetErrorString(r_, &s_); \
     fprintf(stderr, "CUDA error %d (%s) at %d\n", r_, s_ ? s_ : "?", __LINE__); exit(1); } } while (0)
 

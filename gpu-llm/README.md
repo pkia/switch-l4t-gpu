@@ -46,8 +46,29 @@ PLAN.md                   milestone plan
 
 ## Constraints that shaped everything
 
-- CUDA 10 headers only, `-nocudainc -nocudalib`: **no libdevice** — hand-rolled `exp`
-  polynomial, `tanh`, no `__shfl_*`, no `cuda_fp16.h` (manual bit-level FP16 decode).
+- **Always -O3.** nvcc optimizes device code by default; clang does not — a native build
+  without -O3 is ~30× slower. `ncc` compiles kernels with `-O3 -S --cuda-device-only`
+  (verified in the wrapper), and both engines are built `gcc -O3`: Qwen decode went
+  8.9 → 10.1 tok/s from the host-side bump alone.
+- **Runtime-API `<<<>>>` programs hit a clang cuda_wrappers ↔ aarch64 glibc SVE-header
+  clash** on this toolchain (see `examples/native_saxpy.cu` in switch-l4t-gpu). Both
+  engines use the supported workflow exclusively: driver API (`cuModuleLoadData` +
+  `cuLaunchKernel`), no runtime API, no `<<<>>>`.
+- **NVIDIA's libdevice 10.0 bitcode is unusable with LLVM 18 (`-nocudalib`).** All kernels
+  avoid libdevice intrinsics: hand-rolled `exp` polynomial (4-term Taylor of e^(f·ln2),
+  max err ~0.08 %), `tanh` via exp, `__builtin_sqrtf`, manual FP16 bit-decode, no
+  `__shfl_*` — warp reductions use volatile shared memory (safe on sm_53's lockstep warps).
+- **The GPU governor (nvhost_podgov) is locked; clocks ramp from idle.** First runs read
+  low: 76 → 153 → 307 → 460 MHz over ~2 s after idle. Benchmarks here generate ≥60 tokens
+  or warm up first; sustained runs hold 460 MHz (handheld cap) at GR3D 87-99 % utilization.
+- **CUDA 10.0 driver means no modern CUDA apps, no Vulkan compute (llvmpipe only), no
+  llama.cpp GPU backend.** CPU inference still works — but do NOT split a model across
+  CPU+GPU on this SoC: unified memory means one ~20 GB/s bus, and pinning all four cores
+  during generation *lowered* throughput 8.9 → 7.9 tok/s. The CPU handles tokenization,
+  sampling and detokenization (already overlapped with async GPU work); the GPU computes.
+
+- CUDA 10 headers only, `-nocudainc -nocudalib`: **no `cuda_fp16.h`** either — manual
+  bit-level FP16 decode in kernels and on the host.
 - Driver API only: PTX is JIT-compiled at load; kernels never touch the runtime API.
 - 4 GB unified LPDDR4 shared with the OS: one memory bus, ~20 GB/s effective. Decode is
   bandwidth-bound — the GPU alone saturates it (GR3D 87-99 % measured). Adding CPU compute
