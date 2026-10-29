@@ -20,7 +20,7 @@ import numpy as np
 src = sys.argv[1] if len(sys.argv) > 1 else "weights/qwen/model.safetensors"
 out = sys.argv[2] if len(sys.argv) > 2 else "qwen_05b.bin"
 
-V, C, L, NH, NKV, HD, FC, CTX = 151936, 896, 24, 14, 2, 64, 4864, 2048
+V, C, L, NH, NKV, HD, FC, CTX = 151936, 896, 24, 14, 2, 64, 4864, 8192
 KV = NKV * HD                       # 128
 QKV = C + 2 * KV                    # 1152
 GATEUP = 2 * FC                     # 9728

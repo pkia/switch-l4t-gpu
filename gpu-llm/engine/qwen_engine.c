@@ -49,10 +49,11 @@ extern CUresult cuGetErrorString(CUresult, const char **);
 #define KVD (NKV * HD)          // 128
 #define QKVD (C + 2 * KVD)      // 1152
 #define FC 4864
-#define CTX 2048
+#define CTX 8192
 #define BLOCK 256
 
 static const float EPS = 1e-6f, SCALE = 0.125f;
+static int serve_mode = 0;           // --serve: length-prefixed ids on stdin, ids+count on stdout
 static const int EOT = 151643;       // <|endoftext|>
 static const int IM_END = 151645;    // <|im_end|> (instruct turn terminator)
 
@@ -116,7 +117,8 @@ static void load_weights(const char *path) {
     fclose(f);
     h_cos = (const float *)((const char *)h_w + OFF_COS);
     h_sin = (const float *)((const char *)h_w + OFF_SIN);
-    printf("weights: %.1f MiB (%d-layer Qwen2.5-0.5B, fp16)\n", sz / 1048576.0, NL);
+    if (serve_mode) fprintf(stderr, "weights: %.1f MiB (%d-layer Qwen2.5-0.5B, fp16)\n", sz / 1048576.0, NL);
+    else printf("weights: %.1f MiB (%d-layer Qwen2.5-0.5B, fp16)\n", sz / 1048576.0, NL);
 }
 
 static CUdeviceptr dev_copy_f(const void *src, size_t floats) {
@@ -180,8 +182,10 @@ static void gpu_setup(const char *ptx_path) {
     }
     gpu_logits_buf = malloc((size_t)V * 4);
     ref_logits = malloc((size_t)V * 4);
-    printf("gpu ready (weights+kv ~%.0f MiB device)\n",
-           (FILE_BYTES + (size_t)NL * 2 * CTX * KVD * 4) / 1048576.0);
+    if (serve_mode) fprintf(stderr, "gpu ready (weights+kv ~%.0f MiB device, ctx %d)\n",
+                            (FILE_BYTES + (size_t)NL * 2 * CTX * KVD * 4) / 1048576.0, CTX);
+    else printf("gpu ready (weights+kv ~%.0f MiB device, ctx %d)\n",
+                (FILE_BYTES + (size_t)NL * 2 * CTX * KVD * 4) / 1048576.0, CTX);
 }
 
 // ---- stage tracers (--debug)
@@ -399,6 +403,46 @@ static float dev_expf_host(float x) {
     return expf(x);
 }
 
+// ---- serve loop: one weight load, many requests. Protocol per request:
+//   u32 T, T×u32 ids, u32 max_gen   ->   u32 M, M×u32 ids (prompt echo + generation)
+static void serve_loop(void) {
+    static int buf[CTX];
+    for (;;) {
+        uint32_t T = 0;
+        if (fread(&T, 4, 1, stdin) != 1) break;
+        if (T > CTX - 16) {   // keep the tail (latest context)
+            uint32_t drop = T - (CTX - 16);
+            if (fread(buf, 4, T, stdin) != T) break;
+            memmove(buf, buf + drop, (size_t)(CTX - 16) * 4);
+            T = CTX - 16;
+        } else if (T > 0) {
+            if (fread(buf, 4, T, stdin) != T) break;
+        }
+        uint32_t maxg = 0;
+        if (fread(&maxg, 4, 1, stdin) != 1) break;
+        if (maxg > CTX - T - 2) maxg = CTX - T - 2;
+        for (uint32_t p = 0; p < T; p++) gpu_forward(buf[p], p, p == T - 1);
+        int total_s = (int)T;
+        int nxt = greedy_mode ? argmax(gpu_logits_buf, V)
+                              : sample_token(gpu_logits_buf, buf, total_s);
+        buf[total_s++] = nxt;
+        int emitted = 0;
+        for (int g = 0; g < (int)maxg && total_s < CTX; g++) {
+            if (nxt == EOT || nxt == IM_END) break;
+            gpu_forward(nxt, total_s - 1, 1);
+            nxt = greedy_mode ? argmax(gpu_logits_buf, V)
+                              : sample_token(gpu_logits_buf, buf, total_s);
+            buf[total_s++] = nxt;
+            emitted++;
+        }
+        uint32_t outn = (uint32_t)total_s;
+        fwrite(&outn, 4, 1, stdout);
+        fwrite(buf, 4, outn, stdout);
+        fflush(stdout);
+        fprintf(stderr, "serve: T=%u emitted=%d\n", T, emitted);
+    }
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *weights = NULL, *ptx = NULL, *ids_file = NULL;
@@ -411,6 +455,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest") && i + 1 < argc) selftest = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--debug")) debug_flag = 1;
         else if (!strcmp(argv[i], "--greedy")) greedy_mode = 1;
+        else if (!strcmp(argv[i], "--serve")) serve_mode = 1;
         else { fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
     }
     if (!weights || !ptx) { fprintf(stderr, "--weights and --ptx required\n"); return 2; }
@@ -418,6 +463,11 @@ int main(int argc, char **argv) {
 
     load_weights(weights);
     gpu_setup(ptx);
+    if (serve_mode) {
+        fprintf(stderr, "serve mode: reading requests from stdin\n");
+        serve_loop();
+        return 0;
+    }
     kc_h = calloc((size_t)NL * CTX * KVD, 4);
     vc_h = calloc((size_t)NL * CTX * KVD, 4);
 

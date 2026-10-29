@@ -133,3 +133,17 @@ Perf note: 0.5B decode floor = 943 MB ÷ 20 GB/s ≈ 47 ms → ~21 tok/s ceiling
 9 tok/s (43 %) — the gap is GQA attention kernels + per-layer launch overhead, both
 optimizable. Prefill is sequential (66 ms/tok); port gemv_multi for long prompts.
 
+## Hermes backup-model server (2026-10-29)
+
+`server/qwen_serve.py` + engine `--serve` mode expose the Qwen engine as an
+OpenAI-compatible endpoint on the Switch (systemd `qwen-llm.service`, port 8420,
+bearer-token auth, LAN-only via ufw). Context raised to 8192 (KV cache 201 MB device;
+weights+KV ~1.15 GB). Protocol: u32 T, T×u32 ids, u32 max_gen → u32 M, M×u32 ids.
+ALL engine banners must go to stderr in serve mode — stdout is the protocol channel.
+
+Hermes side: `fallback_providers` entry #3 `custom:switchqwen` (base_url
+`http://192.168.0.25:8420/v1`, key_env `SWITCH_LLM_TOKEN` in ~/.hermes/.env).
+E2E proven: `hermes -z ... -m qwen2.5-0.5b-switch --provider custom:switchqwen`
+returned the exact requested string. Light-chat fallback only (0.5B, ~9 tok/s,
+one request at a time) — keeps chat alive during cloud outages, not an agent brain.
+
