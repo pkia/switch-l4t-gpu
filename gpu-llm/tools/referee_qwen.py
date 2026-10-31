@@ -59,6 +59,7 @@ for l in range(24):
     h = h / np.sqrt(ss + np.float32(1e-6)) * g("input_layernorm.weight")
     q = (h @ g("self_attn.q_proj.weight").T).reshape(Tn, NH, HD)
     k = (h @ g("self_attn.k_proj.weight").T).reshape(Tn, NKV, HD)
+    LAST = 33  # token index the debug print below labels; keep it equal to the label
     print("numpy ln1[5][:4]:", h[5][:4].tolist())
     print("numpy kproj[5][:4]:", (h @ g("self_attn.k_proj.weight").T)[5][:4].tolist())
     print("numpy kproj[33][:4]:", (h @ g("self_attn.k_proj.weight").T)[LAST][:4].tolist())
